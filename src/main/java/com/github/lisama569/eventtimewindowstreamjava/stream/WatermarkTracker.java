@@ -62,4 +62,19 @@ public class WatermarkTracker {
     public long allowedLatenessMillis() {
         return allowedLatenessMillis;
     }
+
+    /** 各分区已见最大事件时间的副本，供进度快照使用。 */
+    public synchronized Map<Integer, Long> partitionMaxEventTimes() {
+        return Map.copyOf(maxEventTimePerPartition);
+    }
+
+    /** 是否已经见过该分区。 */
+    public synchronized boolean knowsPartition(int partition) {
+        return maxEventTimePerPartition.containsKey(partition);
+    }
+
+    /** 当前已知分区数量（有界）。 */
+    public synchronized int partitionCount() {
+        return maxEventTimePerPartition.size();
+    }
 }

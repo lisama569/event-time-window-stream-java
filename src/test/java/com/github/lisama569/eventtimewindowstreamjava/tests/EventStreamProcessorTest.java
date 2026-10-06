@@ -103,10 +103,11 @@ class EventStreamProcessorTest {
         assertTrue(p.ingest(new Event("c1", "t1", 0, 100, 1)).isAccepted());
         assertTrue(p.ingest(new Event("c2", "t1", 0, 200, 1)).isAccepted());
         IngestOutcome bp = p.ingest(new Event("c3", "t1", 0, 300, 1));
-        assertEquals(RejectionReason.BACKPRESSURE_CAPACITY, bp.reason());
+        // 4 参构造器把旧 maxInFlight 作为租户级默认额度：顶到的是租户自己的额度
+        assertEquals(RejectionReason.TENANT_BACKLOG_FULL, bp.reason());
         log.info("assert backpressure: inFlight={} reason={}", p.inFlightCount(), bp.reason());
 
-        // 被背压拒绝的事件未记录去重；能推进水位线并关闭窗口的事件豁免背压，
+        // 被租户额度拒绝的事件未记录去重；能推进水位线并关闭窗口的事件豁免额度，
         // 窗口关闭后容量释放，此前被拒事件可重试
         assertTrue(p.ingest(new Event("adv", "t1", 0, 20_000, 0)).isAccepted());
         assertEquals(1, p.inFlightCount(), "c1/c2 随窗口关闭释放，仅剩 adv 自身在途");
@@ -119,13 +120,21 @@ class EventStreamProcessorTest {
         assertTrue(p.ingest(new Event("x1", "tenantA", 0, 100, 1)).isAccepted());
         assertTrue(p.ingest(new Event("x2", "tenantB", 0, 100, 100)).isAccepted());
         assertTrue(p.ingest(new Event("adv", "tenantA", 0, 5_000, 0)).isAccepted());
+        // 新语义：水位线按租户独立。tenantA 推进只定稿 tenantA 自己的窗口，
+        // 安静的 tenantB 不会被别人带着定稿，也不会被别人的水位线干扰迟到判定。
         List<WindowResult> results = p.finalizedResults();
-        assertEquals(2, results.size());
+        assertEquals(1, results.size(), "只有推进自己水位线的 tenantA 定稿");
         for (WindowResult r : results) {
             log.info("tenant window tenant={} sum={}", r.key().tenant(), r.sum());
         }
         assertEquals(1, results.stream().filter(r -> r.key().tenant().equals("tenantA")).mapToLong(WindowResult::sum).sum());
-        assertEquals(100, results.stream().filter(r -> r.key().tenant().equals("tenantB")).mapToLong(WindowResult::sum).sum());
+
+        // tenantB 自己的数据到来后，按它自己的水位线正常定稿，聚合不与 tenantA 串扰
+        assertTrue(p.ingest(new Event("x3", "tenantB", 0, 5_100, 1)).isAccepted());
+        List<WindowResult> all = p.finalizedResults();
+        assertEquals(2, all.size());
+        assertEquals(100, all.stream().filter(r -> r.key().tenant().equals("tenantB")).mapToLong(WindowResult::sum).sum());
+        log.info("assert tenant isolation: tenantB finalized independently sum=100");
     }
 
     @Test
