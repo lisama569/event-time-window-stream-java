@@ -99,7 +99,8 @@ class EventStreamProcessorTest {
 
     @Test
     void backpressureRejectsWhenInFlightFullAndRecoversAfterFinalize() {
-        EventStreamProcessor p = new EventStreamProcessor(10_000L, 1_000L, 2, 1_000);
+        // 全局在途上限 2，但租户额度给到 1000：这里专门验证全局背压仍按 BACKPRESSURE_CAPACITY 拒绝
+        EventStreamProcessor p = new EventStreamProcessor(10_000L, 1_000L, 2, 1_000, 1_000);
         assertTrue(p.ingest(new Event("c1", "t1", 0, 100, 1)).isAccepted());
         assertTrue(p.ingest(new Event("c2", "t1", 0, 200, 1)).isAccepted());
         IngestOutcome bp = p.ingest(new Event("c3", "t1", 0, 300, 1));
@@ -118,14 +119,22 @@ class EventStreamProcessorTest {
         EventStreamProcessor p = newProcessor();
         assertTrue(p.ingest(new Event("x1", "tenantA", 0, 100, 1)).isAccepted());
         assertTrue(p.ingest(new Event("x2", "tenantB", 0, 100, 100)).isAccepted());
+        // 只有 tenantA 自己把数据推进到足以关闭其窗口；tenantB 保持安静，
+        // 它的窗口不得被 tenantA 的水位线“顺带”关闭
         assertTrue(p.ingest(new Event("adv", "tenantA", 0, 5_000, 0)).isAccepted());
         List<WindowResult> results = p.finalizedResults();
-        assertEquals(2, results.size());
+        assertEquals(1, results.size(), "安静租户 B 的窗口不得被租户 A 的推进关闭");
         for (WindowResult r : results) {
             log.info("tenant window tenant={} sum={}", r.key().tenant(), r.sum());
         }
         assertEquals(1, results.stream().filter(r -> r.key().tenant().equals("tenantA")).mapToLong(WindowResult::sum).sum());
-        assertEquals(100, results.stream().filter(r -> r.key().tenant().equals("tenantB")).mapToLong(WindowResult::sum).sum());
+        assertEquals(0, results.stream().filter(r -> r.key().tenant().equals("tenantB")).mapToLong(WindowResult::sum).sum());
+        // tenantB 自己的数据一推进，其窗口立刻能定稿，无需等待任何其他租户
+        assertTrue(p.ingest(new Event("adv-b", "tenantB", 0, 5_000, 0)).isAccepted());
+        List<WindowResult> finalResults = p.finalizedResults();
+        assertEquals(100, finalResults.stream().filter(r -> r.key().tenant().equals("tenantB")).mapToLong(WindowResult::sum).sum());
+        // tenantA 已经跑到很靠前，也不能把 tenantB 这条正常数据误判为太晚
+        assertEquals(2, finalResults.size());
     }
 
     @Test
